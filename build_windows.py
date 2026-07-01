@@ -6,12 +6,14 @@ import sys
 import PyInstaller.__main__
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-ICON_PATH = os.path.join(ROOT, "traffic_light.ico")
+ASSETS_DIR = os.path.join(ROOT, "assets")
+ICON_PATH = os.path.join(ASSETS_DIR, "icon.ico")
 
+os.makedirs(ASSETS_DIR, exist_ok=True)
 sys.path.insert(0, ROOT)
-from traffic_light import save_tray_icon_ico
+from core.rendering.icon import save_tray_icon_ico
 
-print("正在生成托盘图标 traffic_light.ico ...")
+print(f"正在生成托盘图标 {ICON_PATH} ...")
 save_tray_icon_ico(ICON_PATH)
 if not os.path.isfile(ICON_PATH) or os.path.getsize(ICON_PATH) < 1024:
     print(f"错误: 图标文件无效 ({ICON_PATH})", file=sys.stderr)
@@ -19,7 +21,7 @@ if not os.path.isfile(ICON_PATH) or os.path.getsize(ICON_PATH) < 1024:
 print(f"图标已生成: {ICON_PATH} ({os.path.getsize(ICON_PATH)} bytes)")
 
 PyInstaller.__main__.run([
-    os.path.join(ROOT, "traffic_light.py"),
+    os.path.join(ROOT, "main.py"),
     "--onefile",
     "--windowed",
     "--noconfirm",
