@@ -815,16 +815,18 @@ def render_traffic_icon(state, blink_on):
 
 
 def save_tray_icon_ico(output_path):
-    """生成与托盘一致的多尺寸 .ico，供 Windows exe 打包使用"""
+    """生成与托盘一致的多尺寸 .ico，供 Windows exe 打包使用（BMP 格式，兼容 PyInstaller）"""
     from PIL import Image
 
     base = render_traffic_icon("red", True).convert("RGBA")
     sizes = [16, 24, 32, 48, 64, 128, 256]
-    images = [base.resize((size, size), Image.Resampling.LANCZOS) for size in sizes]
-    images[0].save(
+    master = base.resize((256, 256), Image.Resampling.LANCZOS)
+    # PyInstaller 将 ICO 条目原样写入 RT_ICON，Windows 仅支持 BMP/DIB，不能用 PNG 压缩 ICO
+    master.save(
         output_path,
         format="ICO",
         sizes=[(size, size) for size in sizes],
+        bitmap_format="bmp",
     )
 
 
@@ -854,7 +856,6 @@ class FloatWindow:
         self._tk_image = None
         self.root = None
         self._label = None
-        self._context_menu = None
 
     def _ensure_window(self):
         if self.root is not None:
@@ -891,7 +892,6 @@ class FloatWindow:
         self._label.bind("<ButtonRelease-1>", self._on_drag_end)
         self._label.bind("<Button-3>", self._on_right_click)
 
-        self._app.attach_tk_menu_vars(master)
         self._apply_position()
         self._apply_opacity(self._prefs.get("opacity", 0.85))
         self._render_surface()
@@ -981,47 +981,8 @@ class FloatWindow:
         self._prefs["float_y"] = y
         save_ui_prefs(self._app.ui_prefs)
 
-    def close_context_menu(self):
-        menu = self._context_menu
-        self._context_menu = None
-        if menu is None:
-            return
-        try:
-            menu.unpost()
-        except Exception:
-            pass
-        try:
-            menu.grab_release()
-        except Exception:
-            pass
-        try:
-            menu.destroy()
-        except Exception:
-            pass
-
     def _on_right_click(self, event):
-        import tkinter as tk
-
-        self.close_context_menu()
-        self._app.sync_tk_menu_vars()
-        menu = self._app.build_tk_context_menu(self.root)
-        self._context_menu = menu
-
-        def dismiss(_event=None):
-            if self._context_menu is menu:
-                self._context_menu = None
-            try:
-                menu.grab_release()
-            except tk.TclError:
-                pass
-            try:
-                menu.destroy()
-            except tk.TclError:
-                pass
-
-        menu.bind("<Unmap>", dismiss, add="+")
-        menu.bind("<Escape>", dismiss, add="+")
-        menu.post(event.x_root, event.y_root)
+        self._app.show_native_context_menu(event.x_root, event.y_root)
         return "break"
 
     def _show_impl(self):
@@ -1060,6 +1021,49 @@ class FloatWindow:
             self.root = None
 
 
+# ---------- Windows 托盘图标（扩展 pystray 支持浮窗右键菜单） ----------
+WM_SHOW_FLOAT_MENU = 0x400 + 12  # WM_USER + 12，与 pystray 内部消息错开
+
+
+def _create_traffic_light_icon_class(pystray_module):
+    """创建支持浮窗右键菜单的托盘图标类（菜单必须在 pystray 消息线程弹出）"""
+    from pystray._util import win32 as pystray_win32
+
+    class TrafficLightIcon(pystray_module.Icon):
+        def __init__(self, *args, tray_app=None, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._tray_app = tray_app
+            self._message_handlers[WM_SHOW_FLOAT_MENU] = self._on_show_float_menu
+
+        def _on_show_float_menu(self, _wparam, _lparam):
+            app = self._tray_app
+            if app is None:
+                return 0
+            if not self._menu_handle:
+                self.update_menu()
+            if not self._menu_handle:
+                return 0
+
+            x, y = app._float_menu_pos
+            hmenu, callbacks = self._menu_handle
+            pystray_win32.SetForegroundWindow(self._hwnd)
+            index = pystray_win32.TrackPopupMenuEx(
+                hmenu,
+                pystray_win32.TPM_LEFTALIGN
+                | pystray_win32.TPM_TOPALIGN
+                | pystray_win32.TPM_RETURNCMD,
+                int(x),
+                int(y),
+                self._menu_hwnd,
+                None,
+            )
+            if index > 0:
+                callbacks[index - 1](self)
+            return 0
+
+    return TrafficLightIcon
+
+
 # ---------- Windows 系统托盘 ----------
 class WindowsTrayApp:
     def __init__(self):
@@ -1072,18 +1076,17 @@ class WindowsTrayApp:
         self._stop = threading.Event()
         self.float_window = None
         self._tk_root = None
-        self._tk_menu_root = None
-        self._tk_mode_var = None
-        self._tk_theme_var = None
-        self._tk_opacity_var = None
+        self._float_menu_pos = (0, 0)
         sync_visible_projects(self.ui_prefs)
         self.monitor.selected_project = get_tray_project(self.ui_prefs)
         set_selected_project(self.monitor.selected_project)
-        self.icon = pystray.Icon(
+        icon_class = _create_traffic_light_icon_class(pystray)
+        self.icon = icon_class(
             "Claude Traffic Light",
             render_traffic_icon(self.monitor.state, self.monitor.blink_on),
             "Claude Code 红绿灯",
             menu=self._build_menu(),
+            tray_app=self,
         )
 
     def _ensure_float_window(self):
@@ -1094,6 +1097,17 @@ class WindowsTrayApp:
     def _refresh_menus(self):
         self.icon.menu = self._build_menu()
         self.icon.update_menu()
+
+    def show_native_context_menu(self, x, y):
+        """浮窗右键复用托盘原生 Windows 菜单（通过 pystray 消息线程弹出）"""
+        from pystray._util import win32 as pystray_win32
+
+        hwnd = getattr(self.icon, "_hwnd", None)
+        if not hwnd:
+            return
+
+        self._float_menu_pos = (int(x), int(y))
+        pystray_win32.PostMessage(hwnd, WM_SHOW_FLOAT_MENU, 0, 0)
 
     def _project_visibility_action(self, project):
         def action(_icon, _item):
@@ -1116,7 +1130,6 @@ class WindowsTrayApp:
         self.ui_prefs["visible_projects"] = projects_list
         save_ui_prefs(self.ui_prefs)
         self._update_tray_from_visible()
-        self.sync_tk_menu_vars()
         self._refresh_menus()
         self.update_display()
 
@@ -1158,36 +1171,9 @@ class WindowsTrayApp:
             return abs(self.ui_prefs.get("opacity", 0.85) - opacity) < 0.01
         return checked
 
-    def _opacity_menu_value(self):
-        current = float(self.ui_prefs.get("opacity", 0.85))
-        for preset in OPACITY_PRESETS:
-            if abs(current - preset) < 0.01:
-                return str(preset)
-        return str(current)
-
-    def attach_tk_menu_vars(self, root):
-        """绑定浮窗菜单变量到 tk 主窗口"""
-        import tkinter as tk
-
-        if self._tk_menu_root is not root:
-            self._tk_menu_root = root
-            self._tk_mode_var = tk.StringVar(master=root)
-            self._tk_theme_var = tk.StringVar(master=root)
-            self._tk_opacity_var = tk.StringVar(master=root)
-        self.sync_tk_menu_vars()
-
-    def sync_tk_menu_vars(self):
-        """将当前状态同步到浮窗菜单变量"""
-        if self._tk_mode_var is None:
-            return
-        self._tk_mode_var.set(self.ui_prefs.get("display_mode", DISPLAY_TRAY))
-        self._tk_theme_var.set(normalize_theme(self.ui_prefs))
-        self._tk_opacity_var.set(self._opacity_menu_value())
-
     def _set_display_mode(self, mode):
         self.ui_prefs["display_mode"] = mode
         save_ui_prefs(self.ui_prefs)
-        self.sync_tk_menu_vars()
         self._apply_display_mode()
         self.update_display()
         self._refresh_menus()
@@ -1195,7 +1181,6 @@ class WindowsTrayApp:
     def _set_opacity(self, opacity):
         self.ui_prefs["opacity"] = float(opacity)
         save_ui_prefs(self.ui_prefs)
-        self.sync_tk_menu_vars()
         self.update_display()
         self._refresh_menus()
 
@@ -1204,99 +1189,8 @@ class WindowsTrayApp:
             theme = THEME_DARK
         self.ui_prefs["theme"] = theme
         save_ui_prefs(self.ui_prefs)
-        self.sync_tk_menu_vars()
         self.update_display()
         self._refresh_menus()
-
-    def _tk_menu_callback(self, callback):
-        """菜单项回调：先关闭菜单，再延迟执行，避免菜单闪烁/无法关闭"""
-        def wrapper():
-            self._close_float_context_menu()
-            if self._tk_root is not None:
-                self._tk_root.after(50, callback)
-            else:
-                callback()
-        return wrapper
-
-    def _close_float_context_menu(self):
-        if self.float_window is not None:
-            self.float_window.close_context_menu()
-
-    def build_tk_context_menu(self, parent):
-        """构建浮窗右键菜单（与托盘菜单功能与选中状态一致）"""
-        import tkinter as tk
-
-        menu = tk.Menu(parent, tearoff=0)
-        projects = list_active_projects()
-        visible_set = set(sync_visible_projects(self.ui_prefs))
-
-        project_menu = tk.Menu(menu, tearoff=0)
-        if projects:
-            for project in projects:
-                var = tk.BooleanVar(
-                    master=self._tk_menu_root or parent,
-                    value=project in visible_set,
-                )
-                project_menu.add_checkbutton(
-                    label=menu_project_label(project),
-                    variable=var,
-                    command=self._tk_menu_callback(
-                        lambda p=project, v=var: self._set_project_visible(p, v.get())
-                    ),
-                )
-        else:
-            project_menu.add_command(label="(无活跃项目)", state="disabled")
-        menu.add_cascade(label="显示项目", menu=project_menu)
-
-        menu.add_separator()
-
-        style_menu = tk.Menu(menu, tearoff=0)
-        style_menu.add_radiobutton(
-            label="系统托盘",
-            variable=self._tk_mode_var,
-            value=DISPLAY_TRAY,
-            command=self._tk_menu_callback(lambda: self._set_display_mode(DISPLAY_TRAY)),
-        )
-        style_menu.add_radiobutton(
-            label="输入法浮窗",
-            variable=self._tk_mode_var,
-            value=DISPLAY_FLOAT,
-            command=self._tk_menu_callback(lambda: self._set_display_mode(DISPLAY_FLOAT)),
-        )
-        menu.add_cascade(label="显示样式", menu=style_menu)
-
-        theme_menu = tk.Menu(menu, tearoff=0)
-        theme_menu.add_radiobutton(
-            label="黑夜模式",
-            variable=self._tk_theme_var,
-            value=THEME_DARK,
-            command=self._tk_menu_callback(lambda: self._set_theme(THEME_DARK)),
-        )
-        theme_menu.add_radiobutton(
-            label="白天模式",
-            variable=self._tk_theme_var,
-            value=THEME_LIGHT,
-            command=self._tk_menu_callback(lambda: self._set_theme(THEME_LIGHT)),
-        )
-        menu.add_cascade(label="主题", menu=theme_menu)
-
-        opacity_menu = tk.Menu(menu, tearoff=0)
-        for value in OPACITY_PRESETS:
-            opacity_menu.add_radiobutton(
-                label=f"{int(value * 100)}%",
-                variable=self._tk_opacity_var,
-                value=str(value),
-                command=self._tk_menu_callback(lambda v=value: self._set_opacity(v)),
-            )
-        menu.add_cascade(label="透明度", menu=opacity_menu)
-
-        menu.add_separator()
-        menu.add_command(label="绿灯 - 会话进行中", state="disabled")
-        menu.add_command(label="黄灯 - 需要确认", state="disabled")
-        menu.add_command(label="红灯 - 会话结束", state="disabled")
-        menu.add_separator()
-        menu.add_command(label="退出", command=self._tk_menu_callback(self._quit_from_float))
-        return menu
 
     def _apply_display_mode(self):
         if self._tk_root is None:
