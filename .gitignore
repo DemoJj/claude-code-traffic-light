@@ -1,5 +1,6 @@
 new_env
 .claude
+*.state
 
 # Python
 __pycache__/
@@ -16,6 +17,7 @@ build/
 # PyInstaller
 *.spec
 *.app
+assets/icon.ico
 
 # IDE
 .vscode/
