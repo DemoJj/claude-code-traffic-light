@@ -40,12 +40,16 @@ MENU_REFRESH_INTERVAL = 2
 
 DISPLAY_TRAY = "tray"
 DISPLAY_FLOAT = "float"
+THEME_DARK = "dark"
+THEME_LIGHT = "light"
 OPACITY_PRESETS = [0.3, 0.5, 0.7, 0.85, 1.0]
 DEFAULT_UI_PREFS = {
     "display_mode": DISPLAY_TRAY,
     "opacity": 0.85,
     "float_x": None,
     "float_y": None,
+    "visible_projects": [],
+    "theme": THEME_DARK,
 }
 
 TRAFFIC_MARKER = "traffic_light_app"
@@ -76,7 +80,9 @@ FLOAT_GAP = 8
 FLOAT_WIDTH = (
     FLOAT_INNER_PAD + FLOAT_NAME_MAX + FLOAT_GAP + 1 + FLOAT_GAP + FLOAT_LIGHTS_BLOCK + FLOAT_INNER_PAD
 )
-FLOAT_HEIGHT = 34
+FLOAT_ROW_HEIGHT = 26
+FLOAT_FRAME_PAD = 4
+FLOAT_MAX_ROWS = 12
 FLOAT_RADIUS = 12
 FLOAT_FONT = ("Segoe UI", 11)
 FLOAT_SCALE = 3
@@ -85,6 +91,46 @@ FLOAT_BORDER_RGB = (69, 69, 69)
 FLOAT_TRANSPARENT_RGB = (1, 1, 2)
 FLOAT_SEPARATOR_RGB = (69, 69, 69)
 FLOAT_TEXT_RGB = (232, 232, 232)
+
+FLOAT_THEME_PRESETS = {
+    THEME_DARK: {
+        "bg_rgb": FLOAT_BG_RGB,
+        "border_rgb": FLOAT_BORDER_RGB,
+        "separator_rgb": FLOAT_SEPARATOR_RGB,
+        "text_rgb": FLOAT_TEXT_RGB,
+        "light_dim_rgb": LIGHT_DIM,
+        "light_outline_off_rgb": (51, 51, 51),
+        "light_stroke": True,
+        "transparent": FLOAT_TRANSPARENT,
+        "transparent_rgb": FLOAT_TRANSPARENT_RGB,
+    },
+    THEME_LIGHT: {
+        "bg_rgb": (248, 248, 248),
+        "border_rgb": (190, 190, 190),
+        "separator_rgb": (210, 210, 210),
+        "text_rgb": (30, 30, 30),
+        "light_dim_rgb": (195, 195, 195),
+        "light_outline_off_rgb": (165, 165, 165),
+        "light_stroke": False,
+        "transparent": FLOAT_TRANSPARENT,
+        "transparent_rgb": FLOAT_TRANSPARENT_RGB,
+    },
+}
+
+
+def normalize_theme(ui_prefs):
+    """读取并校验主题偏好"""
+    theme = ui_prefs.get("theme", THEME_DARK)
+    if theme not in FLOAT_THEME_PRESETS:
+        theme = THEME_DARK
+    return theme
+
+
+def get_float_theme(ui_prefs=None):
+    """获取浮窗绘制主题配色"""
+    if ui_prefs is None:
+        return FLOAT_THEME_PRESETS[THEME_DARK]
+    return FLOAT_THEME_PRESETS[normalize_theme(ui_prefs)]
 
 
 def get_state_file(project_name=None):
@@ -123,6 +169,136 @@ def list_active_projects():
         return []
 
 
+def display_project_name(project_id):
+    """将内部项目 ID 转为可读名称（盘符根目录等）"""
+    if not project_id:
+        return "default"
+    if project_id.endswith("_drive") and len(project_id) >= 7:
+        letter = project_id[:-6]
+        if len(letter) == 1 and letter.isalpha():
+            return f"{letter.upper()}:\\"
+    if len(project_id) == 2 and project_id[1] == ":" and project_id[0].isalpha():
+        return f"{project_id[0].upper()}:\\"
+    return project_id
+
+
+def menu_project_label(project_id):
+    """菜单标签：转义 &"""
+    return display_project_name(project_id).replace("&", "&&")
+
+
+def sync_visible_projects(ui_prefs):
+    """同步可见项目：保留顺序、移除已结束项目、仅对新出现的项目自动勾选并追加到底部"""
+    active = list_active_projects()
+    active_set = set(active)
+    visible = ui_prefs.get("visible_projects")
+    if not isinstance(visible, list):
+        visible = []
+
+    last_active = ui_prefs.get("_last_active_projects")
+    if not isinstance(last_active, list):
+        last_active = []
+    last_active_set = set(last_active)
+
+    new_visible = [project for project in visible if project in active_set]
+
+    if not visible and active:
+        new_visible = list(active)
+    else:
+        for project in active:
+            if project not in new_visible and project not in last_active_set:
+                new_visible.append(project)
+
+    changed = new_visible != visible or active != last_active
+    ui_prefs["visible_projects"] = new_visible
+    ui_prefs["_last_active_projects"] = active
+    if changed:
+        save_ui_prefs(ui_prefs)
+    return new_visible
+
+
+def get_tray_project(ui_prefs):
+    """菜单「当前项目」显示用（可见列表中的第一个）"""
+    visible = sync_visible_projects(ui_prefs)
+    if visible:
+        return visible[0]
+    projects = list_active_projects()
+    if projects:
+        return projects[0]
+    return get_selected_project()
+
+
+def get_tray_aggregate_projects(ui_prefs=None):
+    """参与托盘聚合亮灯的项目列表"""
+    if ui_prefs is not None:
+        visible = sync_visible_projects(ui_prefs)
+        if visible:
+            return visible
+        active = list_active_projects()
+        if active:
+            return active
+        return [get_selected_project()]
+    active = list_active_projects()
+    if active:
+        return active
+    selected = get_selected_project()
+    return [selected] if selected else []
+
+
+def aggregate_tray_state(project_names):
+    """聚合托盘灯色：全绿→绿；任一黄→黄；全红→红；其余按有黄优先、有绿次之"""
+    if not project_names:
+        return "red"
+    states = [read_project_state(name) for name in project_names]
+    if any(state == "yellow" for state in states):
+        return "yellow"
+    if all(state == "green" for state in states):
+        return "green"
+    if all(state == "red" for state in states):
+        return "red"
+    if any(state == "green" for state in states):
+        return "green"
+    return "red"
+
+
+def read_project_state(project_name):
+    """读取单个项目的状态"""
+    try:
+        state_file = get_state_file(project_name)
+        if Path(state_file).exists():
+            content = Path(state_file).read_text(encoding="utf-8").strip().lower()
+            if content in ("green", "yellow", "red"):
+                return content
+    except Exception:
+        pass
+    return "red"
+
+
+def build_float_project_rows(ui_prefs=None):
+    """构建浮窗多行项目数据：(显示名, 状态)"""
+    if ui_prefs is None:
+        ui_prefs = load_ui_prefs()
+    visible = sync_visible_projects(ui_prefs)
+    if not visible:
+        if not list_active_projects():
+            return [("default", "red")]
+        return [("(无显示项目)", "red")]
+
+    rows = []
+    for name in visible[:FLOAT_MAX_ROWS]:
+        rows.append((display_project_name(name), read_project_state(name)))
+    extra = len(visible) - FLOAT_MAX_ROWS
+    if extra > 0:
+        rows.append((f"... 还有 {extra} 个项目", "red"))
+    return rows
+
+
+def calc_float_height(num_rows):
+    """根据项目行数计算浮窗高度"""
+    num_rows = max(1, num_rows)
+    return FLOAT_FRAME_PAD * 2 + num_rows * FLOAT_ROW_HEIGHT + max(0, num_rows - 1)
+
+
 def load_ui_prefs():
     """读取 UI 偏好（显示模式、透明度、浮窗位置）"""
     prefs = DEFAULT_UI_PREFS.copy()
@@ -147,6 +323,12 @@ def load_ui_prefs():
     except (TypeError, ValueError):
         prefs["opacity"] = 0.85
     prefs["opacity"] = max(0.2, min(1.0, prefs["opacity"]))
+    visible = prefs.get("visible_projects")
+    if not isinstance(visible, list):
+        prefs["visible_projects"] = []
+    else:
+        prefs["visible_projects"] = [str(project) for project in visible]
+    prefs["theme"] = normalize_theme(prefs)
     return prefs
 
 
@@ -182,19 +364,19 @@ def truncate_project_name(name, max_width, font):
     return ellipsis
 
 
-def _light_fill(state, blink_on, color_name):
+def _light_fill(state, blink_on, color_name, light_dim_rgb=LIGHT_DIM):
     if state == color_name:
         if color_name == "yellow" and not blink_on:
-            return _rgb_hex(LIGHT_DIM)
+            return _rgb_hex(light_dim_rgb)
         return _rgb_hex(LIGHT_COLORS[color_name])
-    return _rgb_hex(LIGHT_DIM)
+    return _rgb_hex(light_dim_rgb)
 
 
-def _light_outline(state, blink_on, color_name):
+def _light_outline(state, blink_on, color_name, outline_off_rgb=(51, 51, 51)):
     if state == color_name and (color_name != "yellow" or blink_on):
         r, g, b = LIGHT_COLORS[color_name]
         return f"#{min(r + 40, 255):02x}{min(g + 40, 255):02x}{min(b + 40, 255):02x}"
-    return "#333333"
+    return _rgb_hex(outline_off_rgb)
 
 
 def _hex_to_rgb(hex_color):
@@ -277,47 +459,43 @@ def _get_monitor_work_area(x, y, width, height):
         return 0, 0, 1920, 1040
 
 
-def render_float_surface(state, blink_on, project_name, master=None):
-    """用 PIL 超采样绘制浮窗，边缘更平滑"""
-    from PIL import Image, ImageDraw, ImageTk
-
-    scale = FLOAT_SCALE
-    width = FLOAT_WIDTH * scale
-    height = FLOAT_HEIGHT * scale
-    img = Image.new("RGBA", (width, height), FLOAT_TRANSPARENT_RGB + (255,))
-    draw = ImageDraw.Draw(img)
-
-    radius = FLOAT_RADIUS * scale
+def _draw_float_row(draw, row_top, row_height, project_name, state, blink_on, font, scale, theme):
+    """绘制浮窗中的单行项目"""
     pad = FLOAT_INNER_PAD * scale
     name_max = FLOAT_NAME_MAX * scale
-    font = _get_pil_font(FLOAT_FONT[1] * scale)
+    width = FLOAT_WIDTH * scale
+    row_top_s = row_top * scale
+    row_height_s = row_height * scale
+    cy = row_top_s + row_height_s // 2
+    separator_rgb = theme["separator_rgb"]
+    text_rgb = theme["text_rgb"]
+    light_dim_rgb = theme["light_dim_rgb"]
+    outline_off_rgb = theme["light_outline_off_rgb"]
 
-    draw.rounded_rectangle(
-        (0, 0, width - 1, height - 1),
-        radius=radius,
-        fill=FLOAT_BG_RGB + (255,),
-        outline=FLOAT_BORDER_RGB + (255,),
-        width=scale,
-    )
+    if row_top > FLOAT_FRAME_PAD:
+        draw.line(
+            (pad, row_top_s, width - pad, row_top_s),
+            fill=separator_rgb + (255,),
+            width=scale,
+        )
 
     separator_x = pad + name_max + (FLOAT_GAP * scale) // 2
     draw.line(
-        (separator_x, 7 * scale, separator_x, height - 7 * scale),
-        fill=FLOAT_SEPARATOR_RGB + (255,),
+        (separator_x, row_top_s + 4 * scale, separator_x, row_top_s + row_height_s - 4 * scale),
+        fill=separator_rgb + (255,),
         width=scale,
     )
 
     display_name = _truncate_pil_text(project_name, font, name_max - 4 * scale)
-    draw.text((pad, height // 2), display_name, fill=FLOAT_TEXT_RGB + (255,), font=font, anchor="lm")
+    draw.text((pad, cy), display_name, fill=text_rgb + (255,), font=font, anchor="lm")
 
     lights_start = width - pad - FLOAT_LIGHTS_BLOCK * scale
-    cy = height // 2
     light_r = FLOAT_LIGHT_RADIUS * scale
     for index, color_name in enumerate(["red", "yellow", "green"]):
         cx = lights_start + light_r + index * (FLOAT_LIGHT_DIAMETER + FLOAT_LIGHTS_SPACING) * scale
-        fill_hex = _light_fill(state, blink_on, color_name)
+        fill_hex = _light_fill(state, blink_on, color_name, light_dim_rgb)
         fill_rgb = _hex_to_rgb(fill_hex)
-        outline_hex = _light_outline(state, blink_on, color_name)
+        outline_hex = _light_outline(state, blink_on, color_name, outline_off_rgb)
         outline_rgb = _hex_to_rgb(outline_hex)
         active = state == color_name and (color_name != "yellow" or blink_on)
         if active:
@@ -327,14 +505,59 @@ def render_float_surface(state, blink_on, project_name, master=None):
                 (cx - glow_r, cy - glow_r, cx + glow_r, cy + glow_r),
                 fill=glow + (80,),
             )
-        draw.ellipse(
-            (cx - light_r, cy - light_r, cx + light_r, cy + light_r),
-            fill=fill_rgb + (255,),
-            outline=outline_rgb + (255,),
-            width=(2 if active else 1) * scale,
+        ellipse_box = (cx - light_r, cy - light_r, cx + light_r, cy + light_r)
+        if theme.get("light_stroke", True):
+            draw.ellipse(
+                ellipse_box,
+                fill=fill_rgb + (255,),
+                outline=outline_rgb + (255,),
+                width=(2 if active else 1) * scale,
+            )
+        else:
+            draw.ellipse(ellipse_box, fill=fill_rgb + (255,))
+
+
+def render_float_surface(project_rows, blink_on, master=None, ui_prefs=None):
+    """用 PIL 超采样绘制多项目浮窗"""
+    from PIL import Image, ImageDraw, ImageTk
+
+    if not project_rows:
+        project_rows = [("default", "red")]
+
+    theme = get_float_theme(ui_prefs)
+    scale = FLOAT_SCALE
+    width = FLOAT_WIDTH * scale
+    height = calc_float_height(len(project_rows)) * scale
+    img = Image.new("RGBA", (width, height), theme["transparent_rgb"] + (255,))
+    draw = ImageDraw.Draw(img)
+
+    radius = FLOAT_RADIUS * scale
+    font = _get_pil_font(FLOAT_FONT[1] * scale)
+
+    draw.rounded_rectangle(
+        (0, 0, width - 1, height - 1),
+        radius=radius,
+        fill=theme["bg_rgb"] + (255,),
+        outline=theme["border_rgb"] + (255,),
+        width=scale,
+    )
+
+    for index, (project_name, state) in enumerate(project_rows):
+        row_top = FLOAT_FRAME_PAD + index * (FLOAT_ROW_HEIGHT + 1)
+        _draw_float_row(
+            draw,
+            row_top,
+            FLOAT_ROW_HEIGHT,
+            project_name,
+            state,
+            blink_on,
+            font,
+            scale,
+            theme,
         )
 
-    img = img.resize((FLOAT_WIDTH, FLOAT_HEIGHT), Image.Resampling.LANCZOS)
+    out_h = calc_float_height(len(project_rows))
+    img = img.resize((FLOAT_WIDTH, out_h), Image.Resampling.LANCZOS)
     return ImageTk.PhotoImage(img, master=master)
 
 
@@ -413,6 +636,8 @@ def _hook_cmd(state):
     marker = f"# {TRAFFIC_MARKER}"
     return (
         f'project=$(basename "${{CLAUDE_PROJECT_DIR:-$PWD}}") && '
+        f'if [ -z "$project" ] || [ "$project" = "." ]; then project=default; fi && '
+        f'case "$project" in *:*) project="${{project%:}}_drive";; esac && '
         f'mkdir -p {HOOK_STATE_DIR} && echo {state} > {HOOK_STATE_DIR}/"$project".state {marker}'
     )
 
@@ -501,33 +726,55 @@ class StateMonitor:
         set_selected_project(self.selected_project)
         self._set_state("red")
 
-    def check_state(self):
+    def check_state(self, ui_prefs=None):
         """读取状态文件并更新状态"""
-        state_file = get_state_file(self.selected_project)
         changed = False
+        menu_needs_refresh = False
+
+        if ui_prefs is not None:
+            old_visible = list(ui_prefs.get("visible_projects", []))
+            sync_visible_projects(ui_prefs)
+            if ui_prefs.get("visible_projects") != old_visible:
+                menu_needs_refresh = True
+            tray_project = get_tray_project(ui_prefs)
+            if tray_project != self.selected_project:
+                self.selected_project = tray_project
+                set_selected_project(tray_project)
+                changed = True
+
         try:
-            if Path(state_file).exists():
-                content = Path(state_file).read_text(encoding="utf-8").strip().lower()
-                if content in ("green", "yellow", "red") and self.state != content:
-                    self._set_state(content)
-                    changed = True
-            elif self.state != "red":
-                self._set_state("red")
+            if ui_prefs is not None:
+                projects_for_tray = get_tray_aggregate_projects(ui_prefs)
+            else:
+                projects_for_tray = get_tray_aggregate_projects()
+            content = aggregate_tray_state(projects_for_tray)
+            if content != self.state:
+                self._set_state(content)
                 changed = True
         except Exception:
             pass
 
         now = time.time()
-        menu_needs_refresh = False
         if now - self.last_menu_build_time > MENU_REFRESH_INTERVAL:
             projects = list_active_projects()
-            if projects and self.selected_project not in projects:
+            if ui_prefs is not None:
+                old_visible = list(ui_prefs.get("visible_projects", []))
+                sync_visible_projects(ui_prefs)
+                if ui_prefs.get("visible_projects") != old_visible:
+                    menu_needs_refresh = True
+                tray_project = get_tray_project(ui_prefs)
+                if tray_project != self.selected_project:
+                    self.selected_project = tray_project
+                    set_selected_project(tray_project)
+                    changed = True
+            elif projects and self.selected_project not in projects:
                 self.selected_project = projects[0]
                 set_selected_project(self.selected_project)
                 changed = True
             if projects != self.last_projects:
                 self.last_projects = projects
                 menu_needs_refresh = True
+                changed = True
             self.last_menu_build_time = now
 
         return changed, menu_needs_refresh
@@ -601,9 +848,9 @@ class FloatWindow:
         self._drag_offset = (0, 0)
         self._prefs = prefs
         self._visible = False
-        self._project_name = ""
-        self._state = "red"
+        self._project_rows = []
         self._blink_on = True
+        self._current_height = calc_float_height(1)
         self._tk_image = None
         self.root = None
         self._label = None
@@ -628,7 +875,8 @@ class FloatWindow:
         root.attributes("-topmost", True)
         root.attributes("-transparentcolor", FLOAT_TRANSPARENT)
         root.configure(bg=FLOAT_TRANSPARENT)
-        root.geometry(f"{FLOAT_WIDTH}x{FLOAT_HEIGHT}")
+        self._current_height = calc_float_height(1)
+        root.geometry(f"{FLOAT_WIDTH}x{self._current_height}")
 
         self._label = tk.Label(
             root,
@@ -673,17 +921,29 @@ class FloatWindow:
     def _render_surface(self):
         if self._label is None:
             return
+        if not self._project_rows:
+            self._project_rows = build_float_project_rows(
+                self._app.ui_prefs if self._app else None
+            )
+        new_height = calc_float_height(len(self._project_rows))
+        ui_prefs = self._app.ui_prefs if self._app else None
         self._tk_image = render_float_surface(
-            self._state, self._blink_on, self._project_name, master=self.root
+            self._project_rows,
+            self._blink_on,
+            master=self.root,
+            ui_prefs=ui_prefs,
         )
         self._label.config(image=self._tk_image)
+        if new_height != self._current_height:
+            self._current_height = new_height
+            self._apply_position()
 
     def _clamp_position(self, x, y):
         if self.root is None:
             return int(x), int(y)
         self.root.update_idletasks()
         width = max(self.root.winfo_width(), FLOAT_WIDTH)
-        height = max(self.root.winfo_height(), FLOAT_HEIGHT)
+        height = max(self.root.winfo_height(), self._current_height)
         work_left, work_top, work_right, work_bottom = _get_monitor_work_area(x, y, width, height)
         x = max(work_left, min(int(x), work_right - width))
         y = max(work_top, min(int(y), work_bottom - height))
@@ -698,7 +958,7 @@ class FloatWindow:
             x = self.root.winfo_screenwidth() - FLOAT_WIDTH - 24
             y = 80
         x, y = self._clamp_position(x, y)
-        self.root.geometry(f"{FLOAT_WIDTH}x{FLOAT_HEIGHT}+{x}+{y}")
+        self.root.geometry(f"{FLOAT_WIDTH}x{self._current_height}+{x}+{y}")
 
     def _apply_opacity(self, opacity):
         if self.root is None:
@@ -773,10 +1033,9 @@ class FloatWindow:
         self.root.withdraw()
         self._visible = False
 
-    def _update_impl(self, state, blink_on, opacity, project_name):
-        self._state = state
+    def _update_impl(self, project_rows, blink_on, opacity):
+        self._project_rows = project_rows
         self._blink_on = blink_on
-        self._project_name = project_name
         self._render_surface()
         self._apply_opacity(opacity)
 
@@ -786,8 +1045,8 @@ class FloatWindow:
     def hide(self):
         self._dispatch(self._hide_impl)
 
-    def update(self, state, blink_on, opacity, project_name):
-        self._dispatch(self._update_impl, state, blink_on, opacity, project_name)
+    def update(self, project_rows, blink_on, opacity):
+        self._dispatch(self._update_impl, project_rows, blink_on, opacity)
 
     def destroy(self):
         self._dispatch(self._destroy_impl)
@@ -814,9 +1073,12 @@ class WindowsTrayApp:
         self.float_window = None
         self._tk_root = None
         self._tk_menu_root = None
-        self._tk_project_var = None
         self._tk_mode_var = None
+        self._tk_theme_var = None
         self._tk_opacity_var = None
+        sync_visible_projects(self.ui_prefs)
+        self.monitor.selected_project = get_tray_project(self.ui_prefs)
+        set_selected_project(self.monitor.selected_project)
         self.icon = pystray.Icon(
             "Claude Traffic Light",
             render_traffic_icon(self.monitor.state, self.monitor.blink_on),
@@ -833,14 +1095,47 @@ class WindowsTrayApp:
         self.icon.menu = self._build_menu()
         self.icon.update_menu()
 
-    def _project_action(self, project):
+    def _project_visibility_action(self, project):
         def action(_icon, _item):
-            self._on_select_project(project)
+            visible = project in self.ui_prefs.get("visible_projects", [])
+            self._set_project_visible(project, not visible)
         return action
 
-    def _project_checked(self, project):
+    def _project_visibility_checked(self, project):
         def checked(_item):
-            return project == self.monitor.selected_project
+            return project in self.ui_prefs.get("visible_projects", [])
+        return checked
+
+    def _set_project_visible(self, project, visible):
+        projects_list = list(self.ui_prefs.get("visible_projects", []))
+        if visible:
+            if project not in projects_list:
+                projects_list.append(project)
+        elif project in projects_list:
+            projects_list.remove(project)
+        self.ui_prefs["visible_projects"] = projects_list
+        save_ui_prefs(self.ui_prefs)
+        self._update_tray_from_visible()
+        self.sync_tk_menu_vars()
+        self._refresh_menus()
+        self.update_display()
+
+    def _update_tray_from_visible(self):
+        tray_project = get_tray_project(self.ui_prefs)
+        if tray_project != self.monitor.selected_project:
+            self.monitor.selected_project = tray_project
+            set_selected_project(tray_project)
+        content = aggregate_tray_state(get_tray_aggregate_projects(self.ui_prefs))
+        self.monitor._set_state(content)
+
+    def _theme_action(self, theme):
+        def action(_icon, _item):
+            self._set_theme(theme)
+        return action
+
+    def _theme_checked(self, theme):
+        def checked(_item):
+            return normalize_theme(self.ui_prefs) == theme
         return checked
 
     def _display_mode_action(self, mode):
@@ -871,22 +1166,22 @@ class WindowsTrayApp:
         return str(current)
 
     def attach_tk_menu_vars(self, root):
-        """绑定浮窗菜单变量到 tk 主窗口，确保单选状态与托盘菜单一致"""
+        """绑定浮窗菜单变量到 tk 主窗口"""
         import tkinter as tk
 
         if self._tk_menu_root is not root:
             self._tk_menu_root = root
-            self._tk_project_var = tk.StringVar(master=root)
             self._tk_mode_var = tk.StringVar(master=root)
+            self._tk_theme_var = tk.StringVar(master=root)
             self._tk_opacity_var = tk.StringVar(master=root)
         self.sync_tk_menu_vars()
 
     def sync_tk_menu_vars(self):
         """将当前状态同步到浮窗菜单变量"""
-        if self._tk_project_var is None:
+        if self._tk_mode_var is None:
             return
-        self._tk_project_var.set(self.monitor.selected_project)
         self._tk_mode_var.set(self.ui_prefs.get("display_mode", DISPLAY_TRAY))
+        self._tk_theme_var.set(normalize_theme(self.ui_prefs))
         self._tk_opacity_var.set(self._opacity_menu_value())
 
     def _set_display_mode(self, mode):
@@ -899,6 +1194,15 @@ class WindowsTrayApp:
 
     def _set_opacity(self, opacity):
         self.ui_prefs["opacity"] = float(opacity)
+        save_ui_prefs(self.ui_prefs)
+        self.sync_tk_menu_vars()
+        self.update_display()
+        self._refresh_menus()
+
+    def _set_theme(self, theme):
+        if theme not in FLOAT_THEME_PRESETS:
+            theme = THEME_DARK
+        self.ui_prefs["theme"] = theme
         save_ui_prefs(self.ui_prefs)
         self.sync_tk_menu_vars()
         self.update_display()
@@ -924,21 +1228,25 @@ class WindowsTrayApp:
 
         menu = tk.Menu(parent, tearoff=0)
         projects = list_active_projects()
+        visible_set = set(sync_visible_projects(self.ui_prefs))
 
         project_menu = tk.Menu(menu, tearoff=0)
         if projects:
             for project in projects:
-                project_menu.add_radiobutton(
-                    label=project,
-                    variable=self._tk_project_var,
-                    value=project,
+                var = tk.BooleanVar(
+                    master=self._tk_menu_root or parent,
+                    value=project in visible_set,
+                )
+                project_menu.add_checkbutton(
+                    label=menu_project_label(project),
+                    variable=var,
                     command=self._tk_menu_callback(
-                        lambda p=project: self._on_select_project(p)
+                        lambda p=project, v=var: self._set_project_visible(p, v.get())
                     ),
                 )
         else:
             project_menu.add_command(label="(无活跃项目)", state="disabled")
-        menu.add_cascade(label="选择项目", menu=project_menu)
+        menu.add_cascade(label="显示项目", menu=project_menu)
 
         menu.add_separator()
 
@@ -957,6 +1265,21 @@ class WindowsTrayApp:
         )
         menu.add_cascade(label="显示样式", menu=style_menu)
 
+        theme_menu = tk.Menu(menu, tearoff=0)
+        theme_menu.add_radiobutton(
+            label="黑夜模式",
+            variable=self._tk_theme_var,
+            value=THEME_DARK,
+            command=self._tk_menu_callback(lambda: self._set_theme(THEME_DARK)),
+        )
+        theme_menu.add_radiobutton(
+            label="白天模式",
+            variable=self._tk_theme_var,
+            value=THEME_LIGHT,
+            command=self._tk_menu_callback(lambda: self._set_theme(THEME_LIGHT)),
+        )
+        menu.add_cascade(label="主题", menu=theme_menu)
+
         opacity_menu = tk.Menu(menu, tearoff=0)
         for value in OPACITY_PRESETS:
             opacity_menu.add_radiobutton(
@@ -967,15 +1290,6 @@ class WindowsTrayApp:
             )
         menu.add_cascade(label="透明度", menu=opacity_menu)
 
-        menu.add_separator()
-        menu.add_command(
-            label=f"当前项目: {self.monitor.selected_project}",
-            state="disabled",
-        )
-        menu.add_command(
-            label=f"模型: {self.monitor.claude_info['model']}",
-            state="disabled",
-        )
         menu.add_separator()
         menu.add_command(label="绿灯 - 会话进行中", state="disabled")
         menu.add_command(label="黄灯 - 需要确认", state="disabled")
@@ -1001,14 +1315,14 @@ class WindowsTrayApp:
     def _build_menu(self):
         projects = list_active_projects()
         self.monitor.last_projects = projects
+        sync_visible_projects(self.ui_prefs)
 
         if projects:
             project_items = [
                 self.pystray.MenuItem(
-                    project,
-                    self._project_action(project),
-                    checked=self._project_checked(project),
-                    radio=True,
+                    menu_project_label(project),
+                    self._project_visibility_action(project),
+                    checked=self._project_visibility_checked(project),
                 )
                 for project in projects
             ]
@@ -1016,7 +1330,7 @@ class WindowsTrayApp:
             project_items = [self.pystray.MenuItem("(无活跃项目)", None, enabled=False)]
 
         return self.pystray.Menu(
-            self.pystray.MenuItem("选择项目", self.pystray.Menu(*project_items)),
+            self.pystray.MenuItem("显示项目", self.pystray.Menu(*project_items)),
             self.pystray.Menu.SEPARATOR,
             self.pystray.MenuItem(
                 "显示样式",
@@ -1036,6 +1350,23 @@ class WindowsTrayApp:
                 ),
             ),
             self.pystray.MenuItem(
+                "主题",
+                self.pystray.Menu(
+                    self.pystray.MenuItem(
+                        "黑夜模式",
+                        self._theme_action(THEME_DARK),
+                        checked=self._theme_checked(THEME_DARK),
+                        radio=True,
+                    ),
+                    self.pystray.MenuItem(
+                        "白天模式",
+                        self._theme_action(THEME_LIGHT),
+                        checked=self._theme_checked(THEME_LIGHT),
+                        radio=True,
+                    ),
+                ),
+            ),
+            self.pystray.MenuItem(
                 "透明度",
                 self.pystray.Menu(
                     *[
@@ -1050,9 +1381,6 @@ class WindowsTrayApp:
                 ),
             ),
             self.pystray.Menu.SEPARATOR,
-            self.pystray.MenuItem(f"当前项目: {self.monitor.selected_project}", None, enabled=False),
-            self.pystray.MenuItem(f"模型: {self.monitor.claude_info['model']}", None, enabled=False),
-            self.pystray.Menu.SEPARATOR,
             self.pystray.MenuItem("绿灯 - 会话进行中", None, enabled=False),
             self.pystray.MenuItem("黄灯 - 需要确认", None, enabled=False),
             self.pystray.MenuItem("红灯 - 会话结束", None, enabled=False),
@@ -1060,11 +1388,14 @@ class WindowsTrayApp:
             self.pystray.MenuItem("退出", self._quit),
         )
 
-    def _on_select_project(self, project_name):
-        self.monitor.select_project(project_name)
-        self.sync_tk_menu_vars()
-        self._refresh_menus()
-        self.update_display()
+    def _update_float_display(self):
+        fw = self._ensure_float_window()
+        rows = build_float_project_rows(self.ui_prefs)
+        fw._update_impl(
+            rows,
+            self.monitor.blink_on,
+            self.ui_prefs.get("opacity", 0.85),
+        )
 
     def _quit_from_float(self):
         self._stop.set()
@@ -1097,24 +1428,15 @@ class WindowsTrayApp:
         if self.ui_prefs.get("display_mode") == DISPLAY_FLOAT and self._tk_root is not None:
             self._tk_root.after(0, self._update_float_display)
 
-    def _update_float_display(self):
-        fw = self._ensure_float_window()
-        fw._update_impl(
-            self.monitor.state,
-            self.monitor.blink_on,
-            self.ui_prefs.get("opacity", 0.85),
-            self.monitor.selected_project,
-        )
-
     def _setup(self, icon):
         self._show_tray_icon(icon)
         self._apply_display_mode()
-        self.monitor.check_state()
+        self.monitor.check_state(self.ui_prefs)
         self.update_display()
         print("托盘图标已就绪，请查看任务栏右下角（可能被折叠在 ^ 图标内）", flush=True)
         last_blink = time.time()
         while not self._stop.is_set():
-            changed, menu_refresh = self.monitor.check_state()
+            changed, menu_refresh = self.monitor.check_state(self.ui_prefs)
             now = time.time()
             if now - last_blink >= BLINK_INTERVAL:
                 self.monitor.toggle_blink()
@@ -1123,6 +1445,7 @@ class WindowsTrayApp:
                 self.update_display()
             if menu_refresh:
                 self._refresh_menus()
+                self.update_display()
             time.sleep(POLL_INTERVAL)
 
     def run(self):
@@ -1162,7 +1485,7 @@ def _create_macos_app():
         def _build_menu(self):
             self.menu.clear()
 
-            project_menu = rumps.MenuItem("📁 选择项目")
+            project_menu = rumps.MenuItem("📁 显示项目")
             projects = list_active_projects()
             if not projects:
                 item = rumps.MenuItem("  (无活跃项目)")
@@ -1170,8 +1493,8 @@ def _create_macos_app():
                 project_menu.add(item)
             else:
                 for project in projects:
-                    item = rumps.MenuItem(f"  {project}")
-                    item.set_callback(self._on_select_project)
+                    item = rumps.MenuItem(f"  {menu_project_label(project)}")
+                    item.set_callback(lambda _sender, p=project: self._on_select_project_id(p))
                     if project == self.monitor.selected_project:
                         item.state = True
                     project_menu.add(item)
@@ -1179,7 +1502,7 @@ def _create_macos_app():
 
             self.menu.add(rumps.separator)
             self.menu.add(rumps.MenuItem("📊 当前项目", callback=None))
-            self.menu.add(rumps.MenuItem(f"  项目: {self.monitor.selected_project}"))
+            self.menu.add(rumps.MenuItem(f"  项目: {display_project_name(self.monitor.selected_project)}"))
             self.menu.add(rumps.MenuItem(f"  模型: {self.monitor.claude_info['model']}"))
 
             self.menu.add(rumps.separator)
@@ -1190,6 +1513,11 @@ def _create_macos_app():
 
             self.monitor.last_projects = projects
             self.monitor.last_menu_build_time = time.time()
+
+        def _on_select_project_id(self, project_id):
+            self.monitor.select_project(project_id)
+            self._build_menu()
+            self.update_display()
 
         def _on_select_project(self, sender):
             self.monitor.select_project(sender.title.strip())
