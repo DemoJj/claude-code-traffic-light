@@ -13,6 +13,7 @@ Claude Code 菜单栏状态监控工具 —— 通过红绿灯直观显示 Claud
   - 🟢 绿灯常亮 — 会话进行中
   - 🟡 黄灯闪烁 — 需要确认（等待权限）
   - 🔴 红灯常亮 — 会话结束
+- **Windows 浮窗模式**：右键菜单可切换为输入法风格置顶浮窗，支持 30%~100% 透明度，可拖拽定位
 - **多项目支持**：同时监控多个项目的 Claude Code 状态，一键切换
 - **自动配置**：启动时自动配置 Claude Code hooks，退出时自动还原
 - **配置备份**：安全备份原始 `settings.json`，确保不影响现有配置
@@ -72,6 +73,15 @@ python traffic_light.py
 
 自动开始监控 Claude Code 状态。
 
+#### Windows 浮窗模式
+
+右键托盘图标 → **显示样式** → **输入法浮窗**，即可切换为置顶浮窗（类似输入法状态条）：
+
+- 拖拽浮窗可调整位置（位置会自动保存，且不会拖出屏幕外）
+- **右键浮窗** 可打开与托盘相同的菜单（项目切换、显示样式、透明度等）
+- **透明度** 子菜单可选 30% / 50% / 70% / 85% / 100%
+- 托盘图标仍保留，用于右键菜单操作
+
 ### 退出
 
 - **macOS**：点击菜单栏红绿灯图标，选择「退出」
@@ -102,6 +112,7 @@ python traffic_light.py
 
 - 状态文件：`~/.claude/traffic_light/`
 - 配置备份：`~/.claude/traffic_light/settings_backup.json`
+- UI 偏好（显示样式/透明度/浮窗位置）：`~/.claude/traffic_light_ui.json`
 - 项目选择：`~/.claude/traffic_light/selected_project`
 
 ## 系统要求

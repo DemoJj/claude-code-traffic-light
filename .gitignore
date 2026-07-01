@@ -16,6 +16,7 @@ build/
 # PyInstaller
 *.spec
 *.app
+traffic_light.ico
 
 # IDE
 .vscode/
