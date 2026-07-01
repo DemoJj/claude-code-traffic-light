@@ -3,12 +3,13 @@
 Claude Code 菜单栏状态监控工具 —— 通过红绿灯直观显示 Claude Code 会话状态。
 
 ![macOS](https://img.shields.io/badge/macOS-supported-blue)
+![Windows](https://img.shields.io/badge/Windows-supported-blue)
 ![Python](https://img.shields.io/badge/Python-3.9+-green)
 ![License](https://img.shields.io/badge/License-MIT-yellow)
 
 ## 功能特性
 
-- **红绿灯状态指示**：在 macOS 菜单栏实时显示 Claude Code 会话状态
+- **红绿灯状态指示**：在 macOS 菜单栏 / Windows 系统托盘实时显示 Claude Code 会话状态
   - 🟢 绿灯常亮 — 会话进行中
   - 🟡 黄灯闪烁 — 需要确认（等待权限）
   - 🔴 红灯常亮 — 会话结束
@@ -47,18 +48,35 @@ python build.py
 
 构建完成后，应用位于 `dist/ClaudeTrafficLight.app`。
 
+#### Windows 构建
+
+```bash
+pip install -r requirements.txt
+python build_windows.py
+```
+
+构建完成后，可执行文件位于 `dist/ClaudeTrafficLight.exe`。
+
 ### 方式三：直接运行 Python 脚本
 
 ```bash
+# macOS / Linux
+python3 traffic_light.py
+
+# Windows
 python traffic_light.py
 ```
 
-启动后，菜单栏会出现红绿灯图标，自动开始监控 Claude Code 状态。
+- **macOS**：启动后菜单栏会出现红绿灯图标
+- **Windows**：启动后系统托盘（任务栏右下角）会出现红绿灯图标
+
+自动开始监控 Claude Code 状态。
 
 ### 退出
 
-- 点击菜单栏红绿灯图标，选择「退出」
-- 或按 `Ctrl+C` 终止进程
+- **macOS**：点击菜单栏红绿灯图标，选择「退出」
+- **Windows**：右键托盘图标，选择「退出」
+- 或按 `Ctrl+C` 终止进程（控制台模式）
 
 退出时会自动还原 Claude Code 的 `settings.json` 配置。
 
@@ -88,8 +106,10 @@ python traffic_light.py
 
 ## 系统要求
 
-- macOS 10.15+
-- Python 3.9+（仅从源码构建时需要）
+- **macOS** 10.15+
+- **Windows** 10+
+- Python 3.9+（仅从源码运行/构建时需要）
+- Windows 需已安装 Git Bash（Claude Code hook 运行环境，通常随 Git for Windows 安装）
 
 ## 发布流程
 
