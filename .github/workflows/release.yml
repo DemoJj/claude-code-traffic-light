@@ -14,7 +14,7 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  build-macos:
     runs-on: macos-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -54,32 +54,76 @@ jobs:
       - name: Zip app
         run: cd dist && zip -r ClaudeTrafficLight.app.zip ClaudeTrafficLight.app
 
-      - name: Upload artifact
+      - name: Upload macOS artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ClaudeTrafficLight-${{ steps.version.outputs.version }}
+          name: ClaudeTrafficLight-${{ steps.version.outputs.version }}-macos
           path: |
             dist/ClaudeTrafficLight.app.zip
             dist/ClaudeTrafficLight-${{ steps.version.outputs.version }}.dmg
 
+  build-windows:
+    runs-on: windows-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build exe
+        run: python build_windows.py
+
+      - name: Get version
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClaudeTrafficLight-${{ steps.version.outputs.version }}-windows
+          path: dist/ClaudeTrafficLight.exe
+
   release:
-    needs: build
+    needs: [build-macos, build-windows]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
-      - name: Download artifact
+      - name: Download macOS artifact
         uses: actions/download-artifact@v4
         with:
-          name: ClaudeTrafficLight-${{ needs.build.outputs.version }}
+          name: ClaudeTrafficLight-${{ needs.build-macos.outputs.version }}-macos
+          path: dist
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ClaudeTrafficLight-${{ needs.build-windows.outputs.version }}-windows
+          path: dist
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          name: Claude Code Traffic Light v${{ needs.build.outputs.version }}
+          name: Claude Code Traffic Light v${{ needs.build-macos.outputs.version }}
           body: |
-            ## Claude Code Traffic Light v${{ needs.build.outputs.version }}
+            ## Claude Code Traffic Light v${{ needs.build-macos.outputs.version }}
 
-            ### 安装说明
+            ### macOS 安装
 
             **方式一：直接下载 .app**
             1. 下载 `ClaudeTrafficLight.app.zip`
@@ -87,9 +131,15 @@ jobs:
             3. 双击启动
 
             **方式二：下载 DMG 安装包**
-            1. 下载 `ClaudeTrafficLight-${{ needs.build.outputs.version }}.dmg`
+            1. 下载 `ClaudeTrafficLight-${{ needs.build-macos.outputs.version }}.dmg`
             2. 双击打开 DMG，将应用拖入 Applications 文件夹
             3. 启动应用
+
+            ### Windows 安装
+
+            1. 下载 `ClaudeTrafficLight.exe`
+            2. 双击运行；若出现 SmartScreen 提示，选择「仍要运行」
+            3. 程序会出现在系统托盘（任务栏右下角）
 
             ### 功能特性
 
@@ -102,6 +152,7 @@ jobs:
             ### 系统要求
 
             - macOS 10.15+
+            - Windows 10+
 
             ### ⚠️ macOS 安全提示（"无法验证开发者"）
 
@@ -117,7 +168,8 @@ jobs:
                ```
                然后正常双击打开即可。
           files: |
-            ClaudeTrafficLight.app.zip
-            ClaudeTrafficLight-${{ needs.build.outputs.version }}.dmg
+            dist/ClaudeTrafficLight.app.zip
+            dist/ClaudeTrafficLight-${{ needs.build-macos.outputs.version }}.dmg
+            dist/ClaudeTrafficLight.exe
           draft: false
           prerelease: false
